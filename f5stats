@@ -1,0 +1,31 @@
+#!/bin/bash
+
+# F5STATS
+# Send F5 metrics to graphite.
+. /etc/f5apiauth
+
+jq='# Set Timestamp
+now|floor as $time
+# Stats Profiles
+|$cdnstats|map(.entries[].nestedStats.entries|to_entries[]|select(.key|startswith("cdnstats"))|"f5.\($host).\(.key) \(.value.description) \($time)") as $cdnstats
+# Virtual Server Stats
+|$virtstats|map(.entries[].nestedStats.entries|(.tmName.description|split("/")|.[2]|=gsub("\\.";"_")) as $name|to_entries[]|.value.value=(.value.value//(.value.description|tonumber)?)|select(.key|contains("ephemeral")|not)|select(.key|contains("totRequests") or contains("totConns") or contains("pkts") or contains("bits"))|"f5.\($host).vipstats.\($name[1]).\($name[2]).\(.key) \(.value.value) \($time)") as $virtstats
+# iRule Stats
+|$rulestats|map(.entries[].nestedStats.entries|(.tmName.description|split("/")|.[2]|=gsub("\\.";"_")) as $name|.eventType.description as $type|to_entries[]|select(.key=="totalExecutions" or .key=="avgCycles" or .key=="failures")|"f5.rulestats.\($host)\($name[1])\($name[2])\($type).\(.key) \(.value.value) \($time)") as $rulestats
+# CPU Stats
+|$cpustats|map(.entries[].nestedStats.entries[].nestedStats.entries[]?.nestedStats.entries|.cpuId.value as $cpu|to_entries[]|select(.key=="idle" or .key=="iowait" or .key=="irq" or .key=="niced" or .key=="softirq" or .key=="system" or .key=="user" or .key=="fiveMinAvgIdle")|"f5.\($host).cpustats.\($cpu).\(.key) \(.value.value) \($time)") as $cpustats
+# Member Stats
+|$memberstats|map(.entries[].nestedStats.entries[].nestedStats.entries[]?.nestedStats.entries|(.nodeName.description|split("/")|.[2]|=gsub("\\.";"_")) as $node|(.poolName.description|split("/")|.[2]|=gsub("\\.";"_")) as $pool|to_entries[]|select(.key|contains("tot"))|"f5.\($host).memberstats.\($pool[1]).\($pool[2]).\($node[1]).\($node[2]).\(.key) \(.value.value) \($time)") as $memberstats
+# Output
+|($cdnstats,$virtstats,$rulestats,$cpustats,$memberstats)[]'
+
+for host in lb1 lb2; do
+  baseurl="https://$host.your.net/mgmt/tm/"
+  jq -nrf <(echo "$jq") \
+  --slurpfile cdnstats <(curl -sH "$f5auth" "${baseurl}ltm/profile/statistics/stats") \
+  --slurpfile virtstats <(curl -sH "$f5auth" "${baseurl}ltm/virtual/stats") \
+  --slurpfile rulestats <(curl -sH "$f5auth" "${baseurl}ltm/rule/stats") \
+  --slurpfile cpustats <(curl -sH "$f5auth" "${baseurl}sys/cpu/stats") \
+  --slurpfile memberstats <(curl -sH "$f5auth" "${baseurl}ltm/pool/members/stats") \
+  --arg host "$host" | nc graphite.your.net 2003
+done
